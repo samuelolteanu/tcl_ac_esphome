@@ -5,7 +5,7 @@
 - Fan modes (mute, min, min-mid, mid, mid-high, high, turbo)
 - Indoor unit temperature
 - Target temperature
-- Swing mode (only h/v, and visualization only)
+- Swing mode in additional settings
 
 ### Tested on:
 - Royal Clima rci-pf40hn
@@ -13,9 +13,26 @@
 - SunWind SW-18
 - Kesser Split 12000/BTU
 - Veska VSK-12000BTU (likely TCL TAC-12chsa/xa73i, as the Kesser above)
+- TCL AC model: ELI09 INV/R1
+- Royal Thermo Barocco RTB/in-09HN1
+- Hantech AC (some model??)
+- Daizuki DXTH12E426-20
+- Royal Clima RCI-AR22
+- StarLight 12000 BTU
+- Danby DAS180EAQHWDB
+- Royal Clima RCI-GLF07HN
+- Royal Clima 12HN8
 
-### Unsuccessfully tested:
-- TCL-12chsa/tpg
+### Many users recommend using firmware based on a different UART, for example:
+If you are having trouble where the air conditioner turns on but does not respond to other commands, use this.
+```
+uart:
+  id: uart_bus
+  tx_pin: 17
+  rx_pin: 16
+  baud_rate: 9600
+  parity: EVEN
+```
 
 ### Tuya Module 32001-000140
 The [original WiFi-Module](https://github.com/user-attachments/assets/f1888a35-ba68-4869-9790-71ff8c572931) is an ESP8266 and it's original Tuya firmware can be replaced with Tasmota or esphome. It's case is easy to open and [solderpads for serial connection](https://github.com/user-attachments/assets/4515421f-4346-4248-aba7-d4db3886ac40) are available.
