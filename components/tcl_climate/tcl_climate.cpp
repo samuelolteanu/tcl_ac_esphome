@@ -4,6 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "tcl_climate.h"
 #include <map>  // Add this include
+#include <set>
 
 namespace esphome {
 namespace tcl_climate {
@@ -99,9 +100,9 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
     m_set_cmd.data.power = get_cmd_resp->data.power;
     m_set_cmd.data.off_timer_en = 0;
     m_set_cmd.data.on_timer_en = 0;
-    m_set_cmd.data.beep = 1;
-    m_set_cmd.data.disp = 1;
-    m_set_cmd.data.eco = 0;
+    m_set_cmd.data.beep = beep_on ? 1 : 0;
+    m_set_cmd.data.disp = display_on ? 1 : 0;
+    m_set_cmd.data.eco = get_cmd_resp->data.eco;
     m_set_cmd.data.turbo = get_cmd_resp->data.turbo;
     m_set_cmd.data.mute = get_cmd_resp->data.mute;
 
@@ -109,8 +110,8 @@ void TCLClimate::build_set_cmd(get_cmd_resp_t *get_cmd_resp) {
     static constexpr uint8_t MODE_MAP[] = {
         0x00, // 0x00 - unused
         0x03, // 0x01 -> 0x03
-        0x02, // 0x02 -> 0x02 (fan only)
-        0x07, // 0x03 -> 0x07 (dry)
+        0x07, // 0x02 -> 0x07 (fan only)
+        0x02, // 0x03 -> 0x02 (dry)
         0x01, // 0x04 -> 0x01 (heat)
         0x08  // 0x05 -> 0x08 (auto)
     };
@@ -227,6 +228,12 @@ void TCLClimate::control(const climate::ClimateCall &call) {
     memcpy(get_cmd_resp.raw, m_get_cmd_resp.raw, sizeof(get_cmd_resp.raw));
     bool should_build_cmd = false;
 
+    if (call.get_preset().has_value()) {
+        climate::ClimatePreset preset = *call.get_preset();
+        get_cmd_resp.data.eco = (preset == climate::CLIMATE_PRESET_ECO) ? 1 : 0;
+        should_build_cmd = true;
+    }
+
     if (call.get_mode().has_value()) {
         climate::ClimateMode climate_mode = *call.get_mode();
         ESP_LOGI("TCL", "Received mode control command: %d", static_cast<int>(climate_mode));
@@ -321,6 +328,10 @@ void TCLClimate::control(const climate::ClimateCall &call) {
 climate::ClimateTraits TCLClimate::traits() {
   auto traits = climate::ClimateTraits();
   traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
+  if (this->supports_humidity_) {
+    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_HUMIDITY);
+  }
+  traits.set_supported_presets({climate::CLIMATE_PRESET_NONE, climate::CLIMATE_PRESET_ECO});
   traits.set_supported_modes({
     climate::CLIMATE_MODE_OFF,
     climate::CLIMATE_MODE_COOL,
@@ -408,8 +419,19 @@ void TCLClimate::loop() {
             if (is_valid_xor(buffer, len)) {
                 print_hex_str(buffer, len);
 
-                // Calculate current temperature
-                float curr_temp = ((static_cast<uint16_t>(buffer[17] << 8) | buffer[18]) / 374.0f - 32.0f) / 1.8f;
+                // Current temperature - rate-limited to reject noise
+                // Also logs alternative byte position [16][17] for comparison
+                float curr_temp = (((uint16_t)buffer[17] << 8 | (uint16_t)buffer[18]) / 374.0f - 32.0f) / 1.8f;
+                float alt_temp  = (((uint16_t)buffer[16] << 8 | (uint16_t)buffer[17]) / 374.0f - 32.0f) / 1.8f;
+                ESP_LOGD("TCL", "Temp [17][18]=%.2f°C  [16][17]=%.2f°C", curr_temp, alt_temp);
+
+                // Reject readings that change faster than 1°C per update (noise suppression)
+                static float last_temp = NAN;
+                if (!std::isnan(last_temp) && std::abs(curr_temp - last_temp) > 1.0f) {
+                    curr_temp = last_temp; // hold last valid reading
+                } else {
+                    last_temp = curr_temp;
+                }
                 this->is_changed = false;
 
                 // Set mode
@@ -418,8 +440,8 @@ void TCLClimate::loop() {
                 } else {
                     static const std::map<uint8_t, climate::ClimateMode> MODE_MAP = {
                         {0x01, climate::CLIMATE_MODE_COOL},
-                        {0x03, climate::CLIMATE_MODE_DRY},
-                        {0x02, climate::CLIMATE_MODE_FAN_ONLY},
+                        {0x02, climate::CLIMATE_MODE_FAN_ONLY}, // GET 0x02 = FAN (confirmed)
+                        {0x03, climate::CLIMATE_MODE_DRY},      // GET 0x03 = DRY (confirmed)
                         {0x04, climate::CLIMATE_MODE_HEAT},
                         {0x05, climate::CLIMATE_MODE_AUTO}
                     };
@@ -491,7 +513,17 @@ void TCLClimate::loop() {
                 else set_hswing_pos("Last position");
 
                 this->set_target_temperature(static_cast<float>(m_get_cmd_resp.data.temp + 16));
-                this->set_current_temperature(curr_temp);
+                if (!use_external_temp) {
+                    this->set_current_temperature(curr_temp + temp_offset);
+                }
+
+                // Eco readback - direct preset assignment, must track change manually
+                climate::ClimatePreset new_preset = m_get_cmd_resp.data.eco ?
+                    climate::CLIMATE_PRESET_ECO : climate::CLIMATE_PRESET_NONE;
+                if (this->preset != new_preset) {
+                    this->preset = new_preset;
+                    this->is_changed = true;
+                }
 
                 if (this->is_changed) {
                     this->publish_state();
